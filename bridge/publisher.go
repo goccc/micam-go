@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"log"
+	"sync"
 
 	"github.com/bluenviron/gortsplib/v4"
 	"github.com/bluenviron/gortsplib/v4/pkg/description"
@@ -11,11 +12,21 @@ import (
 	"github.com/pion/rtp/codecs" // Added missing import
 )
 
+const (
+	// Default buffer size for the write queue channel
+	defaultWriteBufferSize = 100
+)
+
 type RTSPPublisher struct {
 	client     *gortsplib.Client
 	u          *gortspliburl.URL
 	media      *description.Media
 	packetizer rtp.Packetizer
+
+	// Async write support
+	writeQueue chan []byte
+	done       chan struct{}
+	wg         sync.WaitGroup
 }
 
 func NewRTSPPublisher(rtspURL, codec string) (*RTSPPublisher, error) {
@@ -24,7 +35,11 @@ func NewRTSPPublisher(rtspURL, codec string) (*RTSPPublisher, error) {
 		return nil, err
 	}
 
-	c := &gortsplib.Client{}
+	// Configure client with larger write queue as a safety net
+	// The main buffering is now done via the channel
+	c := &gortsplib.Client{
+		WriteQueueSize: 1024, // Increased from default 256
+	}
 
 	// Define the media format
 	var forma format.Format
@@ -100,19 +115,69 @@ func NewRTSPPublisher(rtspURL, codec string) (*RTSPPublisher, error) {
 		90000, // Clock rate
 	)
 
-	return &RTSPPublisher{
+	p := &RTSPPublisher{
 		client:     c,
 		u:          u,
 		media:      media,
 		packetizer: packetizer,
-	}, nil
+		writeQueue: make(chan []byte, defaultWriteBufferSize),
+		done:       make(chan struct{}),
+	}
+
+	// Start the async write loop
+	p.wg.Add(1)
+	go p.writeLoop()
+
+	log.Printf("Created RTSP publisher with async writes (buffer: %d, WriteQueueSize: %d)",
+		defaultWriteBufferSize, c.WriteQueueSize)
+
+	return p, nil
 }
 
+// Write queues data for async writing. This is non-blocking.
 func (p *RTSPPublisher) Write(data []byte) error {
-	// The data received from WebSocket is likely a raw stream (Annex B).
-	// We need to split it into NALUs.
-	// A simple way is to look for start codes 00 00 00 01 or 00 00 01.
+	// Make a copy of the data since the caller may reuse the buffer
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
 
+	select {
+	case p.writeQueue <- dataCopy:
+		return nil
+	case <-p.done:
+		return nil // Publisher is closing
+	default:
+		// Queue is full - log and drop the frame
+		// In production, you might want to drop only non-keyframes
+		log.Printf("Warning: Write queue full, dropping frame (%d bytes)", len(data))
+		return nil
+	}
+}
+
+// writeLoop runs in a goroutine and processes the write queue
+func (p *RTSPPublisher) writeLoop() {
+	defer p.wg.Done()
+
+	for {
+		select {
+		case data := <-p.writeQueue:
+			// Process the data: split NALUs and write RTP packets
+			p.processData(data)
+		case <-p.done:
+			// Drain remaining items in the queue before exiting
+			for {
+				select {
+				case data := <-p.writeQueue:
+					p.processData(data)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// processData splits NALUs and writes RTP packets (blocking operations done here)
+func (p *RTSPPublisher) processData(data []byte) {
 	nalus := splitNALUs(data)
 
 	for _, nalu := range nalus {
@@ -121,15 +186,24 @@ func (p *RTSPPublisher) Write(data []byte) error {
 
 		for _, packet := range packets {
 			if err := p.client.WritePacketRTP(p.media, packet); err != nil {
-				return err
+				log.Printf("Error writing RTP packet: %v", err)
+				return
 			}
 		}
 	}
-	return nil
 }
 
 func (p *RTSPPublisher) Close() {
+	// Signal the write loop to stop
+	close(p.done)
+
+	// Wait for the write loop to finish
+	p.wg.Wait()
+
+	// Close the RTSP client
 	p.client.Close()
+
+	log.Println("RTSP publisher closed gracefully")
 }
 
 // splitNALUs splits the byte slice into NAL units based on start codes.
