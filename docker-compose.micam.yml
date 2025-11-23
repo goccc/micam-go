@@ -1,0 +1,10 @@
+services:
+  micam-go:
+    image: micam-go:latest
+    container_name: micam-go
+    network_mode: host
+    volumes:
+      - ./config.yaml:/app/config.yaml
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai

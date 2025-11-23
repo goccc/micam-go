@@ -1,0 +1,18 @@
+cameras:
+  - base_url: "https://miloco:8000"
+    username: "admin"
+    password: "your_password_1"
+    camera_id: "your_camera_id_1"
+    channel: "0"
+    video_codec: "hevc"
+    rtsp_url: "rtsp://go2rtc:8554/cam1"
+    use_ffmpeg: false
+
+  - base_url: "https://miloco:8000"
+    username: "admin"
+    password: "your_password_2"
+    camera_id: "your_camera_id_2"
+    channel: "0"
+    video_codec: "hevc"
+    rtsp_url: "rtsp://go2rtc:8554/cam2"
+    use_ffmpeg: false
